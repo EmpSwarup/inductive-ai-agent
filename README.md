@@ -1,6 +1,6 @@
 # Inductiv AI Agent Persona
 
-- [View Live Demo](https://inductive.vercel.app/)
+- [View Live Demo](https://inductive-ai-agent.vercel.app)
 
 ## Project Objective
 A React-based AI agent application powered by the Gemini API.
@@ -44,4 +44,4 @@ A React-based AI agent application powered by the Gemini API.
 
 OR
 
-Visit the Live Demo at https://inductive.vercel.app/
+Visit the Live Demo at https://inductive-ai-agent.vercel.app

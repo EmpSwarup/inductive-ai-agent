@@ -45,3 +45,9 @@ A React-based AI agent application powered by the Gemini API.
 OR
 
 Visit the Live Demo at https://inductive-ai-agent.vercel.app
+
+## Screenshots
+
+![Home Page](image.png)
+
+![Chat](image-1.png)

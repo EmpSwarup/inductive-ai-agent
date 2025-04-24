@@ -29,49 +29,132 @@ export function useChatManager(): UseChatManagerReturn {
   const isStreamingStartedRef = useRef(false);
   const [newMessageId, setNewMessageId] = useState<string | null>(null);
 
+  // Use a ref to track when we should skip auto-saving
+  const skipAutoSaveRef = useRef(false);
+
+  // Debounced save function
+  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Force save to localStorage immediately
+  const forceSaveConversations = useCallback((convs: ChatConversation[]) => {
+    if (typeof window !== "undefined") {
+      try {
+        localStorage.setItem(CONVERSATIONS_STORAGE_KEY, JSON.stringify(convs));
+        console.log("Forced save:", convs.length, "conversations");
+
+        // Clear any pending auto-save
+        if (saveTimeoutRef.current) {
+          clearTimeout(saveTimeoutRef.current);
+          saveTimeoutRef.current = null;
+        }
+      } catch (err) {
+        console.error("Force save failed:", err);
+      }
+    }
+  }, []);
+
+  // Debounced save function
+  const debouncedSaveConversations = useCallback(
+    (convs: ChatConversation[]) => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+
+      saveTimeoutRef.current = setTimeout(() => {
+        forceSaveConversations(convs);
+        saveTimeoutRef.current = null;
+      }, 500);
+    },
+    [forceSaveConversations]
+  );
+
+  // Update conversation in both state and localStorage
+  const updateConversationInStorage = useCallback(
+    (convId: string, msgList: ChatMessageData[]) => {
+      if (!convId) return;
+
+      // Set flag to skip auto-save since we're manually saving
+      skipAutoSaveRef.current = true;
+
+      setConversations((prevConvs) => {
+        const updatedConvs = prevConvs.map((conv) =>
+          conv.id === convId ? { ...conv, messages: msgList } : conv
+        );
+
+        // Force immediate save to localStorage
+        forceSaveConversations(updatedConvs);
+
+        // Reset flag after state update
+        setTimeout(() => {
+          skipAutoSaveRef.current = false;
+        }, 0);
+
+        return updatedConvs;
+      });
+    },
+    [forceSaveConversations]
+  );
+
   const handleUpdateConversationTitle = useCallback(
     (id: string | null, newTitle: string) => {
       if (!id) return;
-      setConversations((prev) =>
-        prev.map((conv) =>
+
+      // Set flag to skip auto-save since we're manually saving
+      skipAutoSaveRef.current = true;
+
+      setConversations((prev) => {
+        const updated = prev.map((conv) =>
           conv.id === id
             ? { ...conv, title: newTitle || "Untitled Chat" }
             : conv
-        )
-      );
+        );
+
+        // Force save after title update
+        forceSaveConversations(updated);
+
+        // Reset flag after state update
+        setTimeout(() => {
+          skipAutoSaveRef.current = false;
+        }, 0);
+
+        return updated;
+      });
     },
-    []
+    [forceSaveConversations]
   );
 
-  const handleNewChat = useCallback((preventSave = false) => {
+  const handleNewChat = useCallback(() => {
+    // Generate a new ID for the conversation
     const newId = uuidv4();
+
+    // Create the new conversation object
     const newConversation: ChatConversation = {
       id: newId,
       title: "New Conversation",
       messages: [],
       createdAt: new Date(),
     };
+
+    // Set flag to skip auto-save since we're manually saving
+    skipAutoSaveRef.current = true;
+
+    // Update state with the new conversation
     setConversations((prev) => {
-      if (
-        prev.length > 0 &&
-        prev[0].messages.length === 0 &&
-        prev[0].title === "New Conversation"
-      ) {
-        setActiveConversationId(prev[0].id);
-        setMessages([]);
-        setNewMessageId(null);
-        setError(null);
-        setInput("");
-        setIsLoading(false);
-        setAvatarEmotion("neutral");
-        return prev;
-      }
-      // Add the new conversation if it's truly new or if list is empty
-      if (!preventSave) {
-        return [newConversation, ...prev];
-      }
-      return prev;
+      // Create the updated conversations array with the new conversation at the beginning
+      const updated = [newConversation, ...prev];
+
+      // Force immediate save within the state updater function
+      forceSaveConversations(updated);
+
+      // Reset flag after state update (in next tick)
+      setTimeout(() => {
+        skipAutoSaveRef.current = false;
+      }, 0);
+
+      return updated;
     });
+
+    // Set the new conversation as active
     setActiveConversationId(newId);
     setMessages([]);
     setNewMessageId(null);
@@ -79,7 +162,15 @@ export function useChatManager(): UseChatManagerReturn {
     setInput("");
     setIsLoading(false);
     setAvatarEmotion("neutral");
-  }, []);
+  }, [forceSaveConversations]);
+
+  // Backup save effect for changes that aren't caught by direct saves
+  useEffect(() => {
+    if (mounted && conversations.length > 0 && !skipAutoSaveRef.current) {
+      // Use debounced save to avoid excessive saves
+      debouncedSaveConversations(conversations);
+    }
+  }, [conversations, debouncedSaveConversations, mounted]);
 
   const handleInputChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -91,31 +182,51 @@ export function useChatManager(): UseChatManagerReturn {
   const handleSendMessage = useCallback(
     async (event?: React.FormEvent<HTMLFormElement>) => {
       event?.preventDefault();
+
+      // Guard conditions
       const currentInput = input.trim();
       if (!currentInput || isLoading || !activeConversationId) return;
 
+      // Reset UI states
       setError(null);
       setIsLoading(true);
       setAvatarEmotion("thinking");
       isStreamingStartedRef.current = false;
       setInput("");
 
+      // Create user message
       const userMessage: ChatMessageData = {
         id: uuidv4(),
         role: "user",
         content: currentInput,
         createdAt: new Date(),
       };
-      const currentMessagesState = [...messages, userMessage];
-      setMessages(currentMessagesState);
 
-      const apiHistory: GeminiMessage[] = currentMessagesState
+      // Update messages with user input
+      const updatedMessages = [...messages, userMessage];
+      setMessages(updatedMessages);
+
+      // Update conversation in state and localStorage
+      updateConversationInStorage(activeConversationId, updatedMessages);
+
+      // Update conversation title if this is the first message
+      if (messages.length === 0) {
+        const titlePreview =
+          currentInput.length > 25
+            ? `${currentInput.substring(0, 25)}...`
+            : currentInput;
+        handleUpdateConversationTitle(activeConversationId, titlePreview);
+      }
+
+      // Format history for API
+      const apiHistory: GeminiMessage[] = updatedMessages
         .filter((msg) => msg.role === "user" || msg.role === "assistant")
         .map((msg) => ({
           role: msg.role === "assistant" ? "model" : msg.role,
           parts: [{ text: msg.content }],
         }));
 
+      // Create assistant message placeholder
       const assistantMessageId = uuidv4();
       setNewMessageId(assistantMessageId);
 
@@ -125,61 +236,97 @@ export function useChatManager(): UseChatManagerReturn {
         content: "",
         createdAt: new Date(),
       };
-      setMessages((prev) => [...prev, assistantPlaceholder]);
 
+      // Add placeholder to messages
+      const messagesWithAssistant = [...updatedMessages, assistantPlaceholder];
+      setMessages(messagesWithAssistant);
+
+      // Update conversation in storage with placeholder
+      updateConversationInStorage(activeConversationId, messagesWithAssistant);
+
+      // Store accumulated response
       let accumulatedContent = "";
+
+      // For streaming updates, save less frequently
+      let lastSaveTime = Date.now();
+      const SAVE_INTERVAL = 1000; // Save at most once per second during streaming
+
       try {
+        // Get stream from API
         const stream = await generateContentStream(apiHistory);
         if (!stream) throw new Error("Failed to initialize Gemini stream.");
 
+        // Process stream chunks
         for await (const chunk of stream) {
           if (!isStreamingStartedRef.current) {
             isStreamingStartedRef.current = true;
             setAvatarEmotion("typing");
           }
+
+          // Accumulate response text
           accumulatedContent += chunk.text;
-          setMessages((currentMsgState) =>
-            currentMsgState.map((msg) =>
-              msg.id === assistantMessageId
-                ? { ...msg, content: accumulatedContent }
-                : msg
-            )
-          );
+
+          // Update messages with current chunk
+          const updatedWithChunk = updatedMessages.concat({
+            ...assistantPlaceholder,
+            content: accumulatedContent,
+          });
+
+          setMessages(updatedWithChunk);
+
+          // Save each chunk to storage but limit frequency
+          const now = Date.now();
+          if (now - lastSaveTime > SAVE_INTERVAL) {
+            updateConversationInStorage(activeConversationId, updatedWithChunk);
+            lastSaveTime = now;
+          }
         }
 
+        // Final save of the complete message
+        const finalMessages = updatedMessages.concat({
+          ...assistantPlaceholder,
+          content: accumulatedContent,
+        });
+        setMessages(finalMessages);
+        updateConversationInStorage(activeConversationId, finalMessages);
+
+        // Delay for UX
         const characters = accumulatedContent.length;
         const msPerChar = 15;
         const baseDelay = 300;
-        const calculatedDelay = Math.min(baseDelay + characters * msPerChar);
-        console.log(
-          `Response length: ${characters}, Calculated delay: ${calculatedDelay}ms`
+        const calculatedDelay = Math.min(
+          baseDelay + characters * msPerChar,
+          2000
         );
         await new Promise((resolve) => setTimeout(resolve, calculatedDelay));
 
-        if (currentMessagesState.length === 1) {
-          handleUpdateConversationTitle(
-            activeConversationId,
-            currentInput.substring(0, 25) +
-              (currentInput.length > 25 ? "..." : "")
-          );
-        }
+        // Update avatar emotion
         setAvatarEmotion("happy");
         setTimeout(() => setAvatarEmotion(getRandomIdleEmotion()), 2000);
       } catch (err: any) {
+        // Handle errors
         console.error("Error during Gemini stream:", err);
         const errorMessage = err.message || "An error occurred contacting AI.";
         setError(errorMessage);
+
         await new Promise((resolve) => setTimeout(resolve, 300));
         setAvatarEmotion("error");
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === assistantMessageId
-              ? { ...msg, content: `Error: ${errorMessage}`, role: "error" }
-              : msg
-          )
-        );
+
+        // Update messages with error
+        const updatedWithError = updatedMessages.concat({
+          ...assistantPlaceholder,
+          content: `Error: ${errorMessage}`,
+          role: "error",
+        });
+
+        setMessages(updatedWithError);
+
+        // Save error to storage
+        updateConversationInStorage(activeConversationId, updatedWithError);
+
         setTimeout(() => setAvatarEmotion(getRandomIdleEmotion()), 3000);
       } finally {
+        // Reset UI states
         setIsLoading(false);
         isStreamingStartedRef.current = false;
         setTimeout(() => setNewMessageId(null), 500);
@@ -188,11 +335,11 @@ export function useChatManager(): UseChatManagerReturn {
     [
       input,
       isLoading,
-      activeConversationId,
       messages,
-      conversations,
+      activeConversationId,
       handleUpdateConversationTitle,
-    ] // conversations needed for title update
+      updateConversationInStorage,
+    ]
   );
 
   const handleSwitchConversation = useCallback(
@@ -213,96 +360,166 @@ export function useChatManager(): UseChatManagerReturn {
 
   const handleDeleteConversation = useCallback(
     (id: string) => {
-      const updatedConversations = conversations.filter((c) => c.id !== id);
-      setConversations(updatedConversations);
+      // Set flag to skip auto-save since we're manually saving
+      skipAutoSaveRef.current = true;
+
+      setConversations((prev) => {
+        const updated = prev.filter((c) => c.id !== id);
+
+        // Force save after deletion
+        forceSaveConversations(updated);
+
+        // Reset flag after state update
+        setTimeout(() => {
+          skipAutoSaveRef.current = false;
+        }, 0);
+
+        return updated;
+      });
+
+      // Handle active conversation changes if deleted
       if (id === activeConversationId) {
-        if (updatedConversations.length > 0) {
-          const sorted = [...updatedConversations].sort(
+        const remainingConversations = conversations.filter((c) => c.id !== id);
+
+        if (remainingConversations.length > 0) {
+          // Find the most recent conversation
+          const sorted = [...remainingConversations].sort(
             (a, b) =>
               new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
           );
+
           const nextConv = sorted[0];
           setActiveConversationId(nextConv.id);
           setMessages(nextConv.messages || []);
-          setNewMessageId(null);
-          setError(null);
-          setInput("");
-          setIsLoading(false);
-          setAvatarEmotion("neutral");
         } else {
+          // Create new if no conversations left
           handleNewChat();
         }
+
+        // Reset UI states
+        setNewMessageId(null);
+        setError(null);
+        setInput("");
+        setIsLoading(false);
+        setAvatarEmotion("neutral");
       }
     },
-    [conversations, activeConversationId, handleNewChat]
+    [conversations, activeConversationId, handleNewChat, forceSaveConversations]
   );
 
-  // Load conversations
+  // Load conversations on mount
   useEffect(() => {
     if (typeof window !== "undefined") {
       setMounted(true);
+
       try {
+        // Get saved conversations
         const saved = localStorage.getItem(CONVERSATIONS_STORAGE_KEY);
-        const loaded = saved
-          ? JSON.parse(saved).map((c: any) => ({
-              ...c,
-              createdAt: new Date(c.createdAt),
-              messages: c.messages || [],
-            }))
-          : [];
-        setConversations(loaded);
-        if (loaded.length > 0) {
-          const sorted = [...loaded].sort(
+
+        let loadedConversations: ChatConversation[] = [];
+
+        if (saved) {
+          // Parse and fix dates
+          loadedConversations = JSON.parse(saved).map((c: any) => ({
+            ...c,
+            createdAt: new Date(c.createdAt),
+            messages: (c.messages || []).map((m: any) => ({
+              ...m,
+              createdAt: new Date(m.createdAt),
+            })),
+          }));
+
+          console.log("Loaded", loadedConversations.length, "conversations");
+        }
+
+        // Set loaded conversations or create initial
+        if (loadedConversations.length > 0) {
+          // Skip auto-save on initial load
+          skipAutoSaveRef.current = true;
+          setConversations(loadedConversations);
+          setTimeout(() => {
+            skipAutoSaveRef.current = false;
+          }, 0);
+
+          // Sort by most recent
+          const sorted = [...loadedConversations].sort(
             (a, b) =>
               new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
           );
-          setActiveConversationId(sorted[0].id);
-          setMessages(sorted[0].messages || []);
+
+          // Set most recent as active
+          const mostRecent = sorted[0];
+          setActiveConversationId(mostRecent.id);
+          setMessages(mostRecent.messages || []);
         } else {
-          handleNewChat(true);
-        } // Prevent save on initial load
+          // Create initial conversation
+          const initialId = uuidv4();
+          const initialConv: ChatConversation = {
+            id: initialId,
+            title: "New Conversation",
+            messages: [],
+            createdAt: new Date(),
+          };
+
+          // Skip auto-save since we're manually saving
+          skipAutoSaveRef.current = true;
+          setConversations([initialConv]);
+          setTimeout(() => {
+            skipAutoSaveRef.current = false;
+          }, 0);
+
+          setActiveConversationId(initialId);
+
+          // Save initial conversation
+          forceSaveConversations([initialConv]);
+        }
       } catch (e) {
-        console.error("Load failed:", e);
-        handleNewChat(true);
+        console.error("Failed to load conversations:", e);
+
+        // Fallback to new conversation
+        const initialId = uuidv4();
+        const initialConv: ChatConversation = {
+          id: initialId,
+          title: "New Conversation",
+          messages: [],
+          createdAt: new Date(),
+        };
+
+        // Skip auto-save since we're manually saving
+        skipAutoSaveRef.current = true;
+        setConversations([initialConv]);
+        setTimeout(() => {
+          skipAutoSaveRef.current = false;
+        }, 0);
+
+        setActiveConversationId(initialId);
+        forceSaveConversations([initialConv]);
       }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Run once
 
-  // Save conversations
-  useEffect(() => {
-    if (mounted) {
-      localStorage.setItem(
-        CONVERSATIONS_STORAGE_KEY,
-        JSON.stringify(conversations)
-      );
+      // Clean up on unmount
+      return () => {
+        if (saveTimeoutRef.current) {
+          clearTimeout(saveTimeoutRef.current);
+        }
+      };
     }
-  }, [conversations, mounted]);
+  }, [forceSaveConversations]);
 
-  // Update conversation object
-  useEffect(() => {
-    if (mounted && activeConversationId) {
-      setConversations((p) =>
-        p.map((c) => (c.id === activeConversationId ? { ...c, messages } : c))
-      );
-    }
-  }, [messages, mounted, activeConversationId]);
-
+  // Computed values
   const statusText = useMemo(() => {
     if (error) return "Error";
-    if (isLoading)
+    if (isLoading) {
       return isStreamingStartedRef.current ? "Typing..." : "Thinking...";
+    }
     return "";
-  }, [isLoading, isStreamingStartedRef.current, error]);
-  const currentAvatarEmotion = useMemo(
-    () =>
-      isLoading
-        ? isStreamingStartedRef.current
-          ? "typing"
-          : "thinking"
-        : avatarEmotion,
-    [isLoading, isStreamingStartedRef.current, avatarEmotion]
-  );
+  }, [isLoading, error]);
+
+  const currentAvatarEmotion = useMemo(() => {
+    if (isLoading) {
+      return isStreamingStartedRef.current ? "typing" : "thinking";
+    }
+    return avatarEmotion;
+  }, [isLoading, avatarEmotion]);
 
   return {
     messages,

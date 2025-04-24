@@ -58,10 +58,7 @@ export default function ConversationItem({
     >
       <button
         onClick={() => onSelect(conversation.id)}
-        className={cn(
-          "flex-1 overflow-hidden text-left px-3 py-2 rounded-md",
-          "focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400"
-        )}
+        className={cn("flex-1 overflow-hidden text-left px-3 py-2 rounded-md")}
       >
         <div className="font-medium truncate text-gray-900 dark:text-gray-200">
           {conversation.title}
